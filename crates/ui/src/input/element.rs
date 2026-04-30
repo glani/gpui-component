@@ -2124,8 +2124,26 @@ impl Element for TextElement {
             glyph.paint(window, cx);
         }
 
+        // Sub-epic E P3: when the mode shows line numbers, swap the
+        // mouse cursor to Arrow over the gutter so it doesn't read as
+        // the editor's text-insertion area.
+        let has_line_numbers = self.state.read(cx).mode.line_number();
+        if has_line_numbers {
+            window.set_cursor_style(
+                gpui::CursorStyle::Arrow,
+                &prepaint.fold_icon_layout.line_number_hitbox,
+            );
+        }
+
+        let line_number_hitbox = if has_line_numbers {
+            Some(prepaint.fold_icon_layout.line_number_hitbox.clone())
+        } else {
+            None
+        };
+
         self.state.update(cx, |state, cx| {
             state.last_layout = Some(prepaint.last_layout.clone());
+            state.line_number_hitbox = line_number_hitbox;
             state.last_bounds = Some(bounds);
             state.last_cursor = Some(state.cursor());
             state.set_input_bounds(input_bounds, cx);

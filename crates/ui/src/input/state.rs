@@ -316,6 +316,12 @@ pub struct InputState {
     /// The marked range is the temporary insert text on IME typing.
     pub(super) ime_marked_range: Option<Selection>,
     pub(super) last_layout: Option<LastLayout>,
+    /// The hitbox covering the line-number gutter region from the last
+    /// paint (Sub-epic E P4). Available whenever the mode shows line
+    /// numbers; consumed via [`InputState::line_number_hitbox`] so
+    /// downstream click routing can map mouse events back to gutter
+    /// rows without re-reading the layout.
+    pub(super) line_number_hitbox: Option<gpui::Hitbox>,
     pub(super) last_cursor: Option<usize>,
     /// The input container bounds
     pub(super) input_bounds: Bounds<Pixels>,
@@ -469,6 +475,7 @@ impl InputState {
             validate: None,
             mode: InputMode::default(),
             last_layout: None,
+            line_number_hitbox: None,
             last_bounds: None,
             last_selected_range: None,
             last_cursor: None,
@@ -681,6 +688,43 @@ impl InputState {
     #[inline]
     pub fn line_decoration_provider(&self) -> Option<&Arc<dyn LineDecorationProvider>> {
         self.mode.line_decoration_provider()
+    }
+
+    /// Hitbox covering the gutter (line-number column) from the most
+    /// recent paint. Provided as a primitive for consumer-side
+    /// click-routing in future epics. Sub-epic E does not consume this
+    /// directly. Returns `None` until at least one frame has painted
+    /// or when the mode does not show line numbers.
+    #[inline]
+    pub fn line_number_hitbox(&self) -> Option<&gpui::Hitbox> {
+        self.line_number_hitbox.as_ref()
+    }
+
+    /// Bounds, in window coordinates, of buffer line `row` from the
+    /// most recent paint. Useful for placing pop-ups or hitboxes
+    /// against a specific line without re-reading the layout. Returns
+    /// `None` when `row` is outside the visible range, when the layout
+    /// has no entry for the row (folded), or when no paint has run yet.
+    ///
+    /// Provided as a primitive for consumer-side click-routing in
+    /// future epics. Sub-epic E does not consume this directly.
+    pub fn visible_line_bounds(&self, row: u32) -> Option<Bounds<Pixels>> {
+        let layout = self.last_layout.as_ref()?;
+        let row = row as usize;
+
+        let mut offset_y = layout.visible_top;
+        for (line, &buffer_line) in layout.lines.iter().zip(layout.visible_buffer_lines.iter()) {
+            let height = layout.line_height * line.wrapped_lines.len() as f32;
+            if buffer_line == row {
+                let last_bounds = self.last_bounds?;
+                return Some(Bounds::new(
+                    last_bounds.origin + point(px(0.), offset_y),
+                    gpui::size(last_bounds.size.width, height),
+                ));
+            }
+            offset_y += height;
+        }
+        None
     }
 
     /// Attach or clear the line decoration provider. Only meaningful
