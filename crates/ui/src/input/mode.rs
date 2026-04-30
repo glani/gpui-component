@@ -1,4 +1,5 @@
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 use std::{cell::RefCell, ops::Range};
 
@@ -7,6 +8,7 @@ use ropey::Rope;
 
 use super::display_map::DisplayMap;
 use crate::highlighter::DiagnosticSet;
+use crate::highlighter::LineDecorationProvider;
 use crate::highlighter::SyntaxHighlighter;
 use crate::input::{InputEdit, RopeExt as _, TabSize};
 
@@ -45,6 +47,9 @@ pub(crate) enum InputMode {
         highlighter: Rc<RefCell<Option<SyntaxHighlighter>>>,
         diagnostics: DiagnosticSet,
         parse_task: Rc<RefCell<Option<Task<()>>>>,
+        /// Optional per-line decoration provider, queried each frame
+        /// for line tints + gutter glyphs.
+        line_decoration_provider: Option<Arc<dyn LineDecorationProvider>>,
     },
 }
 
@@ -78,6 +83,7 @@ impl InputMode {
             folding: true,
             diagnostics: DiagnosticSet::new(&Rope::new()),
             parse_task: Rc::new(RefCell::new(None)),
+            line_decoration_provider: None,
         }
     }
 
@@ -318,6 +324,33 @@ impl InputMode {
             _ => None,
         }
     }
+
+    /// Borrow the line decoration provider, if one is attached. Only
+    /// [`InputMode::CodeEditor`] supports decorations.
+    pub(crate) fn line_decoration_provider(&self) -> Option<&Arc<dyn LineDecorationProvider>> {
+        match self {
+            InputMode::CodeEditor {
+                line_decoration_provider,
+                ..
+            } => line_decoration_provider.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Set or clear the line decoration provider. No-op for non-code
+    /// editor modes.
+    pub(crate) fn set_line_decoration_provider(
+        &mut self,
+        provider: Option<Arc<dyn LineDecorationProvider>>,
+    ) {
+        if let InputMode::CodeEditor {
+            line_decoration_provider,
+            ..
+        } = self
+        {
+            *line_decoration_provider = provider;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -352,6 +385,7 @@ mod tests {
             highlighter: Default::default(),
             diagnostics: DiagnosticSet::new(&Rope::new()),
             parse_task: Default::default(),
+            line_decoration_provider: None,
         };
         assert_eq!(mode.is_code_editor(), true);
         assert_eq!(mode.is_multi_line(), false);

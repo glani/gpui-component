@@ -2,6 +2,10 @@
 mod diagnostics;
 pub use diagnostics::*;
 
+// Line decoration provider API - works on all platforms (no tree-sitter dependency)
+mod line_decorations;
+pub use line_decorations::*;
+
 // Native implementation with full tree-sitter support
 #[cfg(not(target_family = "wasm"))]
 mod highlighter;

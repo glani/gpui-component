@@ -11,8 +11,9 @@ use ropey::Rope;
 use smallvec::SmallVec;
 
 use crate::{
-    ActiveTheme as _, Colorize, IconName, Root, Selectable, Sizable as _,
+    ActiveTheme as _, Colorize, Icon, IconName, Root, Selectable, Sizable as _,
     button::{Button, ButtonVariants as _},
+    highlighter::{LineDecorationGlyph, LineDecorationItem},
     input::{RopeExt as _, blink_cursor::CURSOR_WIDTH, display_map::LineLayout},
 };
 
@@ -24,6 +25,11 @@ pub(super) const LINE_NUMBER_RIGHT_MARGIN: Pixels = px(10.);
 const FOLD_ICON_WIDTH: Pixels = px(14.);
 const FOLD_ICON_HITBOX_WIDTH: Pixels = px(18.);
 const MAX_HIGHLIGHT_LINE_LENGTH: usize = 10_000;
+/// Width reserved for a per-line decoration glyph. Painted at the left
+/// edge of the gutter; with line-number columns wider than ~3 digits
+/// the glyph overlaps the leftmost digit, which mirrors the JetBrains
+/// convention.
+const DECORATION_GLYPH_WIDTH: Pixels = px(12.);
 
 use super::MASK_CHAR;
 
@@ -117,9 +123,7 @@ fn empty_bottom_height(
     }
     match override_rows {
         Some(rows) => rows as f32 * line_height,
-        None => viewport_height
-            .half()
-            .max(BOTTOM_MARGIN_ROWS * line_height),
+        None => viewport_height.half().max(BOTTOM_MARGIN_ROWS * line_height),
     }
 }
 
@@ -129,6 +133,41 @@ struct FoldIconLayout {
     line_number_hitbox: Hitbox,
     /// List of (display_row, is_folded, icon_element) pairs for each fold candidate
     icons: Vec<(usize, bool, gpui::AnyElement)>,
+}
+
+/// Layout information for per-line decorations queried from the active
+/// [`crate::highlighter::LineDecorationProvider`]. Built in prepaint
+/// and consumed by paint.
+#[derive(Default)]
+struct DecorationLayout {
+    /// All items returned by the provider for the current visible row
+    /// range. Used by the line-tint pass.
+    items: Vec<LineDecorationItem>,
+    /// Pre-painted gutter glyph elements paired with the buffer line
+    /// they belong to. Only items whose `glyph` is `Some` appear here.
+    glyphs: Vec<gpui::AnyElement>,
+}
+
+/// Default fixed-variant icon + color mapping for line decoration
+/// glyphs. Sub-epic E hardcodes the colors so the dispatch path lights
+/// up without any theme lookup; tunable presets can land later.
+fn build_decoration_glyph_element(glyph: &LineDecorationGlyph) -> gpui::AnyElement {
+    let (icon_name, color) = match glyph {
+        LineDecorationGlyph::DiffAdded => (IconName::Plus, gpui::hsla(0.33, 0.55, 0.45, 1.0)),
+        LineDecorationGlyph::DiffRemoved => (IconName::Minus, gpui::hsla(0.0, 0.65, 0.5, 1.0)),
+        LineDecorationGlyph::DiffChanged => (IconName::Asterisk, gpui::hsla(0.13, 0.7, 0.5, 1.0)),
+        LineDecorationGlyph::Conflict => {
+            (IconName::TriangleAlert, gpui::hsla(0.08, 0.85, 0.55, 1.0))
+        }
+        LineDecorationGlyph::Bookmark => (IconName::StarFill, gpui::hsla(0.6, 0.6, 0.5, 1.0)),
+        LineDecorationGlyph::Breakpoint => (IconName::CircleX, gpui::hsla(0.0, 0.55, 0.4, 1.0)),
+        LineDecorationGlyph::Custom { icon, color } => (icon.clone(), *color),
+    };
+
+    Icon::new(icon_name)
+        .text_color(color)
+        .with_size(crate::Size::Size(DECORATION_GLYPH_WIDTH))
+        .into_any_element()
 }
 
 pub(super) struct TextElement {
@@ -996,6 +1035,82 @@ impl TextElement {
         icon_layout
     }
 
+    /// Layout per-line decoration glyphs during prepaint.
+    ///
+    /// Queries the active
+    /// [`crate::highlighter::LineDecorationProvider`] (if any) for the
+    /// current visible row range, then prepaints a glyph element for
+    /// each item that carries a [`LineDecorationGlyph`]. Glyphs render
+    /// at the left edge of the gutter — for line-number columns wider
+    /// than ~3 digits the glyph overlaps the leftmost digit, which is
+    /// the JetBrains convention. Returns an empty layout when the mode
+    /// has no provider attached.
+    fn layout_decoration_glyphs(
+        &self,
+        bounds: &Bounds<Pixels>,
+        last_layout: &LastLayout,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> DecorationLayout {
+        let (provider, visible_buffer_lines) = {
+            let state = self.state.read(cx);
+            let provider = state.line_decoration_provider().cloned();
+            let visible_buffer_lines = last_layout.visible_buffer_lines.clone();
+            (provider, visible_buffer_lines)
+        };
+
+        let Some(provider) = provider else {
+            return DecorationLayout::default();
+        };
+
+        if visible_buffer_lines.is_empty() {
+            return DecorationLayout::default();
+        }
+
+        let first = *visible_buffer_lines.first().unwrap() as u32;
+        let last = *visible_buffer_lines.last().unwrap() as u32;
+        let visible_range = first..last.saturating_add(1);
+        let items = provider.decorations_for(visible_range, cx);
+
+        if items.is_empty() {
+            return DecorationLayout::default();
+        }
+
+        let line_height = last_layout.line_height;
+        let mut offset_y = last_layout.visible_top;
+        let mut glyphs: Vec<gpui::AnyElement> = Vec::new();
+
+        for (line, &buffer_line) in last_layout.lines.iter().zip(visible_buffer_lines.iter()) {
+            let buffer_line_u32 = buffer_line as u32;
+            let height = line_height * line.wrapped_lines.len() as f32;
+
+            for item in &items {
+                if item.line == buffer_line_u32 {
+                    if let Some(glyph) = &item.glyph {
+                        let glyph_y = offset_y + (line_height - DECORATION_GLYPH_WIDTH).half();
+                        let glyph_origin = bounds.origin + point(px(0.), glyph_y);
+                        let glyph_bounds = Bounds::new(
+                            glyph_origin,
+                            size(DECORATION_GLYPH_WIDTH, DECORATION_GLYPH_WIDTH),
+                        );
+                        let mut element = build_decoration_glyph_element(glyph);
+                        element.prepaint_as_root(
+                            glyph_bounds.origin,
+                            glyph_bounds.size.into(),
+                            window,
+                            cx,
+                        );
+                        glyphs.push(element);
+                    }
+                }
+            }
+
+            offset_y += height;
+        }
+
+        DecorationLayout { items, glyphs }
+    }
+
     /// Paint fold icons using prepaint hitboxes.
     ///
     /// This handles:
@@ -1231,6 +1346,8 @@ pub(super) struct PrepaintState {
     bounds: Bounds<Pixels>,
     /// Fold icon layout data
     fold_icon_layout: FoldIconLayout,
+    /// Per-line decoration layout data (Sub-epic E)
+    decoration_layout: DecorationLayout,
     // Inline completion rendering data
     /// Shaped ghost lines to paint after cursor row (completion lines 2+)
     ghost_lines: Vec<ShapedLine>,
@@ -1685,6 +1802,7 @@ impl Element for TextElement {
         let indent_guides_path =
             self.layout_indent_guides(state, &bounds, &last_layout, &text_style, window);
         let fold_icon_layout = self.layout_fold_icons(&bounds, &last_layout, window, cx);
+        let decoration_layout = self.layout_decoration_glyphs(&bounds, &last_layout, window, cx);
 
         PrepaintState {
             bounds,
@@ -1701,6 +1819,7 @@ impl Element for TextElement {
             document_color_paths,
             indent_guides_path,
             fold_icon_layout,
+            decoration_layout,
             ghost_first_line,
             ghost_lines,
             ghost_lines_height,
@@ -1784,6 +1903,36 @@ impl Element for TextElement {
                     }
                 }
                 offset_y += height;
+            }
+        }
+
+        // Paint per-line decoration tints (Sub-epic E). Painted after
+        // the active-line tint so a tinted line still shows the active
+        // outline on top, and before indent guides so guides remain
+        // visible over the tint.
+        if !prepaint.decoration_layout.items.is_empty() {
+            let mut offset_y = px(0.);
+            if let Some(line_numbers) = prepaint.line_numbers.as_ref() {
+                offset_y += invisible_top_padding;
+                for (lines, &buffer_line) in line_numbers
+                    .iter()
+                    .zip(prepaint.last_layout.visible_buffer_lines.iter())
+                {
+                    let height = line_height * lines.len() as f32;
+                    let buffer_line_u32 = buffer_line as u32;
+                    for item in &prepaint.decoration_layout.items {
+                        if item.line == buffer_line_u32 {
+                            if let Some(tint) = item.line_tint {
+                                let p = point(input_bounds.origin.x, origin.y + offset_y);
+                                window.paint_quad(fill(
+                                    Bounds::new(p, size(bounds.size.width, height)),
+                                    tint,
+                                ));
+                            }
+                        }
+                    }
+                    offset_y += height;
+                }
             }
         }
 
@@ -1957,6 +2106,14 @@ impl Element for TextElement {
             window,
             cx,
         );
+
+        // Paint per-line decoration glyphs (Sub-epic E). The glyph
+        // elements were prepainted in `layout_decoration_glyphs` so
+        // each one already carries its bounds; we only need to drive
+        // its paint pass here.
+        for glyph in prepaint.decoration_layout.glyphs.iter_mut() {
+            glyph.paint(window, cx);
+        }
 
         self.state.update(cx, |state, cx| {
             state.last_layout = Some(prepaint.last_layout.clone());
@@ -2320,12 +2477,7 @@ mod tests {
         for override_lines in [None, Some(0), Some(3), Some(99)] {
             for visible_lines in [0_usize, 1, 8, 64] {
                 assert_eq!(
-                    cursor_surrounding_padding(
-                        true,
-                        override_lines,
-                        visible_lines,
-                        line_height,
-                    ),
+                    cursor_surrounding_padding(true, override_lines, visible_lines, line_height,),
                     line_height,
                 );
             }
@@ -2372,12 +2524,7 @@ mod tests {
             for visible_lines in [0_usize, 1, 8, 100] {
                 let viewport_half = (visible_lines as f32 * line_height).half();
                 assert_eq!(
-                    cursor_surrounding_padding(
-                        false,
-                        Some(lines),
-                        visible_lines,
-                        line_height,
-                    ),
+                    cursor_surrounding_padding(false, Some(lines), visible_lines, line_height,),
                     raw.min(viewport_half),
                 );
             }

@@ -23,11 +23,14 @@ use super::{
     DisplayMap, MASK_CHAR, blink_cursor::BlinkCursor, change::Change, element::TextElement,
     mask_pattern::MaskPattern, mode::InputMode, number_input,
 };
+use std::sync::Arc;
+
 use crate::Size;
 use crate::actions::{SelectDown, SelectLeft, SelectRight, SelectUp};
 use crate::highlighter::DiagnosticSet;
 #[cfg(not(target_family = "wasm"))]
 use crate::highlighter::LanguageRegistry;
+use crate::highlighter::LineDecorationProvider;
 use crate::input::blink_cursor::CURSOR_WIDTH;
 use crate::input::movement::MoveDirection;
 use crate::input::{
@@ -670,6 +673,27 @@ impl InputState {
     #[inline]
     pub fn diagnostics_mut(&mut self) -> Option<&mut DiagnosticSet> {
         self.mode.diagnostics_mut()
+    }
+
+    /// Borrow the line decoration provider, if one is attached. Returns
+    /// `None` for non-[`InputMode::CodeEditor`] modes and for code-editor
+    /// modes with no provider configured.
+    #[inline]
+    pub fn line_decoration_provider(&self) -> Option<&Arc<dyn LineDecorationProvider>> {
+        self.mode.line_decoration_provider()
+    }
+
+    /// Attach or clear the line decoration provider. Only meaningful
+    /// for [`InputMode::CodeEditor`] modes; calls on other modes are
+    /// silently ignored. Notifies on every call so consumers can flip
+    /// providers and have the next frame pick up the change.
+    pub fn set_line_decoration_provider(
+        &mut self,
+        provider: Option<Arc<dyn LineDecorationProvider>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.mode.set_line_decoration_provider(provider);
+        cx.notify();
     }
 
     /// Set placeholder
@@ -2987,6 +3011,53 @@ ORDER BY id
                     deferred.y,
                     safe_y_min,
                 );
+            });
+        });
+    }
+
+    /// Sub-epic E (line decorations) — round-trip through the
+    /// provider setter/getter and confirm the new field is observable
+    /// only on `CodeEditor` modes.
+    #[gpui::test]
+    fn set_line_decoration_provider_round_trips(cx: &mut TestAppContext) {
+        use crate::highlighter::{LineDecorationItem, LineDecorationProvider};
+        use std::ops::Range;
+
+        struct EmptyProvider;
+        impl LineDecorationProvider for EmptyProvider {
+            fn decorations_for(&self, _: Range<u32>, _: &gpui::App) -> Vec<LineDecorationItem> {
+                vec![]
+            }
+        }
+
+        let input_view = InputView::new(cx);
+        let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
+        let input = input_view.input;
+
+        // Initially no provider.
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                assert!(state.line_decoration_provider().is_none());
+            });
+        });
+
+        // Set a provider and confirm it round-trips.
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| {
+                state.set_line_decoration_provider(Some(Arc::new(EmptyProvider)), cx);
+            });
+            input.read_with(cx, |state, _| {
+                assert!(state.line_decoration_provider().is_some());
+            });
+        });
+
+        // Clear with `None` and confirm it's gone.
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| {
+                state.set_line_decoration_provider(None, cx);
+            });
+            input.read_with(cx, |state, _| {
+                assert!(state.line_decoration_provider().is_none());
             });
         });
     }
