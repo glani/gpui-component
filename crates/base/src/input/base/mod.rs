@@ -1,3 +1,4 @@
+use crate::input::InputHit;
 use crate::{StateStyle, StyledExt as _, TestSupportExt as _};
 use gpui::{
     AnyElement, App, Div, ElementId, InteractiveElement, Interactivity, IntoElement, ParentElement,
@@ -30,6 +31,7 @@ pub struct InputContextMenuCapabilities {
     masked: bool,
     go_to_definition: bool,
     code_actions: bool,
+    hit: Option<InputHit>,
 }
 
 impl InputContextMenuCapabilities {
@@ -71,6 +73,12 @@ impl InputContextMenuCapabilities {
 
     pub fn code_actions(mut self, code_actions: bool) -> Self {
         self.code_actions = code_actions;
+        self
+    }
+
+    /// Set what the click that opened the menu was over.
+    pub fn hit(mut self, hit: Option<InputHit>) -> Self {
+        self.hit = hit;
         self
     }
 
@@ -116,6 +124,12 @@ impl InputContextMenuCapabilities {
 
     pub fn has_code_actions(&self) -> bool {
         self.code_actions
+    }
+
+    /// What the click that opened the menu was over: the text, or a row of the
+    /// gutter. `None` when the menu was not opened by a click on the input.
+    pub fn hit_target(&self) -> Option<InputHit> {
+        self.hit
     }
 }
 

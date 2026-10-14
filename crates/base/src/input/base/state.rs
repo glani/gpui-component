@@ -470,7 +470,10 @@ pub struct InputBaseState<M: InputModeKind> {
     context_menu_handler: Option<
         Rc<dyn Fn(NativeMenu, InputContextMenuCapabilities, Point<Pixels>, &mut Window, &mut App)>,
     >,
-    pending_context_menu: Option<(Point<Pixels>, usize)>,
+    pending_context_menu: Option<(Point<Pixels>, usize, Option<InputHit>)>,
+    /// Whether a right-click on the gutter moves the caret to its row, as one
+    /// on the text does.
+    pub(super) gutter_context_menu_moves_cursor: bool,
 
     /// Whether the context menu that shows on right-click is enabled.
     ///
@@ -799,6 +802,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             diagnostic_popover: None,
             context_menu_handler: None,
             pending_context_menu: None,
+            gutter_context_menu_moves_cursor: true,
             enable_context_menu: true,
             completion_inserting: false,
             overlay_action_handler: None,
@@ -820,6 +824,26 @@ impl<M: InputModeKind> InputBaseState<M> {
     pub fn context_menu(mut self, enable: bool) -> Self {
         self.enable_context_menu = enable;
         self
+    }
+
+    /// Sets whether a right-click on the gutter moves the caret to the row
+    /// clicked, as a right-click on the text does.
+    ///
+    /// It does by default. Turn it off to keep the selection while a menu for
+    /// a row of the gutter is open; [`InputContextMenuCapabilities::hit_target`]
+    /// tells the menu which row it is.
+    pub fn gutter_context_menu_moves_cursor(mut self, moves: bool) -> Self {
+        self.gutter_context_menu_moves_cursor = moves;
+        self
+    }
+
+    pub fn set_gutter_context_menu_moves_cursor(&mut self, moves: bool) {
+        self.gutter_context_menu_moves_cursor = moves;
+    }
+
+    /// Returns true when a right-click at `hit` leaves the caret where it is.
+    fn keeps_cursor_on_context_menu(&self, hit: Option<InputHit>) -> bool {
+        !self.gutter_context_menu_moves_cursor && hit.is_some_and(|hit| hit.is_gutter())
     }
 
     pub fn set_context_menu_enabled(&mut self, enabled: bool) {
@@ -2146,6 +2170,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         &mut self,
         position: Point<Pixels>,
         offset: usize,
+        hit: Option<InputHit>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2156,16 +2181,17 @@ impl<M: InputModeKind> InputBaseState<M> {
             return;
         }
 
-        if !self.active_selection().contains(offset) {
+        let keep_cursor = self.keeps_cursor_on_context_menu(hit);
+        if !keep_cursor && !self.active_selection().contains(offset) {
             self.move_to(offset, None, cx);
         }
 
-        if self.is_code_editor() {
+        if self.is_code_editor() && !keep_cursor {
             M::on_hover_definition(self, offset, window, cx);
         }
 
         if let Some(handler) = self.context_menu_handler.clone() {
-            let capabilities = self.context_menu_capabilities();
+            let capabilities = self.context_menu_capabilities().hit(hit);
             cx.defer_in(window, move |_, window, cx| {
                 handler(NativeMenu::new(), capabilities, position, window, cx);
             });
@@ -2387,10 +2413,13 @@ impl<M: InputModeKind> InputBaseState<M> {
         // Show Mouse context menu
         if event.button == MouseButton::Right {
             if self.enable_context_menu {
-                if !self.active_selection().contains(offset) {
+                let hit = self.hit_test(event.position);
+                if !self.keeps_cursor_on_context_menu(hit)
+                    && !self.active_selection().contains(offset)
+                {
                     self.move_to(offset, None, cx);
                 }
-                self.pending_context_menu = Some((event.position, offset));
+                self.pending_context_menu = Some((event.position, offset, hit));
             }
             return;
         }
@@ -2429,8 +2458,8 @@ impl<M: InputModeKind> InputBaseState<M> {
         cx: &mut Context<Self>,
     ) {
         if event.button == MouseButton::Right {
-            if let Some((position, offset)) = self.pending_context_menu.take() {
-                self.handle_right_click_menu(position, offset, window, cx);
+            if let Some((position, offset, hit)) = self.pending_context_menu.take() {
+                self.handle_right_click_menu(position, offset, hit, window, cx);
             }
         }
         if self.active_selection().is_empty() {
@@ -5999,7 +6028,7 @@ mod tests {
                     calls2.set(calls2.get() + 1);
                     items2.set(menu.items.len());
                 }));
-                state.handle_right_click_menu(point(px(0.), px(0.)), 0, window, cx);
+                state.handle_right_click_menu(point(px(0.), px(0.)), 0, None, window, cx);
             })
         });
         assert_eq!(calls.get(), 1);
@@ -6008,7 +6037,7 @@ mod tests {
         cx.update(|window, cx| {
             input.update(cx, |state, cx| {
                 state.disabled = true;
-                state.handle_right_click_menu(point(px(0.), px(0.)), 0, window, cx);
+                state.handle_right_click_menu(point(px(0.), px(0.)), 0, None, window, cx);
             })
         });
         assert_eq!(calls.get(), 1);
