@@ -7317,6 +7317,60 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_rows_in_view_are_laid_out_at_the_end_past_many_spacer_rows(cx: &mut TestAppContext) {
+        use crate::input::Spacer;
+        // More spacer rows than the viewport holds: above the first line, above
+        // a line near the end, below the last line, and split in two.
+        let cases = [
+            vec![Spacer::above(0, 12)],
+            vec![Spacer::above(22, 12)],
+            vec![Spacer::below(25, 12)],
+            vec![Spacer::below(3, 6), Spacer::above(24, 6)],
+        ];
+        for wrap in [false, true] {
+            for spacers in &cases {
+                let (editor, window, _) = spaced_editor(cx, wrap, spacers.clone());
+                let mut cx = VisualTestContext::from_window(window.into(), cx);
+                cx.update(|window, cx| {
+                    window.draw(cx).clear(cx);
+                    editor.update(cx, |state, cx| {
+                        state.set_scroll_offset(point(px(0.), px(-10_000.)), cx)
+                    });
+                    window.draw(cx).clear(cx);
+
+                    let state = editor.read(cx);
+                    let layout = state.last_layout.as_ref().unwrap();
+                    let map = state.display_map();
+                    let painted = state
+                        .editor_scrollbar_snapshot
+                        .get()
+                        .unwrap()
+                        .cursor_scroll_offset
+                        .y;
+                    let height = state.input_bounds.size.height;
+                    assert_eq!(painted, height - state.scroll_size.height);
+
+                    // The line of every row in the viewport is laid out, so its
+                    // text or its spacers are drawn; the last line's included.
+                    let top = (-painted / layout.line_height).floor() as usize;
+                    let bottom = ((height - painted) / layout.line_height).ceil() as usize;
+                    let shown: Vec<usize> = (top..bottom.min(map.display_row_count()))
+                        .map(|row| map.display_row_to_buffer_line(row))
+                        .collect();
+                    assert!(shown.contains(&25), "{spacers:?}, wrap {wrap}: {shown:?}");
+                    for line in shown {
+                        assert!(
+                            layout.visible_buffer_lines.contains(&line),
+                            "line {line} with {spacers:?}, wrap {wrap}: laid out {:?}",
+                            layout.visible_buffer_lines
+                        );
+                    }
+                });
+            }
+        }
+    }
+
+    #[gpui::test]
     fn editor_line_number_gutter_resizes_with_document_lines(cx: &mut TestAppContext) {
         let (editor, window) = decoration_editor(cx, &"x\n".repeat(8), false);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
